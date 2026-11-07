@@ -1,0 +1,16 @@
+.gradle/
+**/build/
+local.properties
+dist/
+*.jks
+*.keystore
+__pycache__/
+*.pyc
+tools/phone-relay.local.json
+tools/phone-relay.local.json.tmp
+*.local.md
+.env
+.env.*
+.idea/
+*.iml
+.DS_Store
