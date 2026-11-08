@@ -9,6 +9,8 @@ import { once } from 'node:events';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
+import { channel } from 'node:diagnostics_channel';
+import { RelayDiagnostics } from '../server-plugin/jiuguan-relay/relay-diagnostics.mjs';
 import { RelayController, RelayError, RuntimeRouting, validateMutation, validatePhone, registerRoutes }
     from '../server-plugin/jiuguan-relay/relay-controller.mjs';
 import { createBridge, probePhone, isLocalDestination }
@@ -121,8 +123,9 @@ async function runtimeChild() {
     const routing = new RuntimeRouting({ filter: {
         isDelegated: () => delegated, setDelegated: value => { delegated = value; },
     } });
-    const controller = new RelayController({ routing, probe: () => probePhone(phone.phone),
-        bridgeFactory: () => createBridge({ phone: phone.phone, SocksClient, localDirect: false }),
+    const diagnostics = new RelayDiagnostics();
+    const controller = new RelayController({ routing, diagnostics, probe: () => probePhone(phone.phone),
+        bridgeFactory: () => createBridge({ phone: phone.phone, SocksClient, localDirect: false, diagnostics }),
     });
     try {
         await controller.enable(request());
@@ -137,6 +140,11 @@ async function runtimeChild() {
             setTimeout(() => outgoing.end(body.subarray(12345)), 20);
         });
         assert.equal(response, 'first\nlast\n'); assert.deepEqual(received[1].bytes, body);
+        const diagnosticResult = controller.diagnosticStatus(request());
+        assert.equal(diagnosticResult.outbound.nodeHttp.requests, 1, 'Internal bridge forwarding must not be counted again');
+        assert.equal(diagnosticResult.outbound.nativeFetch.requests, 1);
+        assert.equal(diagnosticResult.bridge.httpForwarded, 1);
+        assert.equal(diagnosticResult.bridge.tunnelsEstablished, 1);
         assert(phone.destinations.every(destination => destination.host === 'plugin-target.invalid'));
         const originalCount = received.length;
         await assert.rejects(() => fetch(`http://127.0.0.1:${port}/must-not-bypass`));
@@ -303,6 +311,69 @@ if (process.argv.includes('--runtime-child')) {
         await routes['/enable'](request({ user: null }), response);
         assert.equal(status, 403); assert.equal(result.ok, false); assert.equal(cache, 'no-store');
         assert.equal(JSON.stringify(result).includes(password), false);
+    });
+
+    test('diagnostics route requires an administrator and retains the stopped session without caching', async () => {
+        const { controller } = fixture();
+        const routes = {};
+        registerRoutes({ get: (route, handler) => { routes[route] = handler; }, post() {} }, controller);
+        let code = 200, body, cache;
+        const response = { set(_key, value) { cache = value; return this; }, status(value) { code = value; return this; }, json(value) { body = value; } };
+        await routes['/diagnostics'](request({ user: null }), response);
+        assert.equal(code, 403); assert.equal(cache, 'no-store');
+        await controller.enable(request());
+        let current = controller.diagnosticStatus(request());
+        assert.equal(current.protocol, 1); assert.equal(current.routeMode, 'mobile'); assert(current.since);
+        assert.equal(current.bridge.connectRequests, 0); assert.equal(current.outbound.nodeHttp.requests, 0);
+        controller.diagnostics.bridgeEvent(undefined, 'connect_request');
+        await controller.enable(request());
+        assert.equal(controller.diagnosticStatus(request()).bridge.connectRequests, 1, 'Idempotent enable must retain evidence');
+        await controller.disable(request());
+        current = controller.diagnosticStatus(request());
+        assert.equal(current.routeMode, 'normal'); assert(current.stoppedAt); assert.equal(current.bridge.connectRequests, 1);
+        code = 200; await routes['/diagnostics'](request(), response);
+        assert.equal(code, 200); assert.equal(body.routeMode, 'normal'); assert.equal(cache, 'no-store');
+        await controller.close();
+    });
+
+    test('passive diagnostics expose only host/status/phase and discard old or internal requests', () => {
+        const diagnostics = new RelayDiagnostics(), first = {}, second = {};
+        diagnostics.start(first);
+        try {
+            const secret = 'DO-NOT-REPORT';
+            const req = { method: 'POST', host: 'api.example.invalid', path: `/private?key=${secret}`, headers: { Authorization: secret } };
+            channel('http.client.request.created').publish({ request: req });
+            channel('http.client.request.start').publish({ request: req });
+            channel('http.client.response.finish').publish({ request: req, response: { statusCode: 400, headers: { secret } } });
+            let result = diagnostics.snapshot('mobile');
+            assert.equal(result.outbound.nodeHttp.requests, 1); assert.equal(result.outbound.nodeHttp.responses, 1);
+            assert.deepEqual(result.outbound.nodeHttp.last, { hostname: 'api.example.invalid', status: 400, phase: 'api_response' });
+            const internalAgent = {}; diagnostics.ignoreAgent(internalAgent);
+            channel('http.client.request.created').publish({ request: { method: 'GET', host: 'api.example.invalid', agent: internalAgent } });
+            channel('http.client.request.created').publish({ request: { method: 'CONNECT', host: '127.0.0.1' } });
+            assert.equal(diagnostics.snapshot('mobile').outbound.nodeHttp.requests, 1);
+            const native = { method: 'GET', origin: 'https://native.example.invalid', path: secret };
+            channel('undici:request:create').publish({ request: native });
+            channel('undici:request:error').publish({ request: native, error: new Error(secret) });
+            assert.deepEqual(diagnostics.snapshot('mobile').outbound.nativeFetch.last,
+                { hostname: 'native.example.invalid', status: null, phase: 'request_failed' });
+            diagnostics.bridgeEvent(first, 'connect_request'); diagnostics.bridgeEvent(first, 'tunnel_established');
+            diagnostics.bridgeEvent(first, 'failure', { hostname: `user:${secret}@bad.invalid`, phase: 'format', error: secret });
+            result = diagnostics.snapshot('mobile');
+            assert.equal(JSON.stringify(result).includes(secret), false);
+            assert.deepEqual(result.bridge.lastError, { hostname: null, status: 400, phase: 'format' });
+            diagnostics.stop(); const stopped = diagnostics.snapshot('normal');
+            channel('http.client.request.created').publish({ request: { method: 'GET', host: 'stopped.invalid' } });
+            diagnostics.bridgeEvent(first, 'connect_request');
+            assert.deepEqual(diagnostics.snapshot('normal'), stopped);
+            diagnostics.start(second);
+            channel('http.client.request.start').publish({ request: req });
+            channel('http.client.response.finish').publish({ request: req, response: { statusCode: 200 } });
+            diagnostics.bridgeEvent(first, 'failure', { phase: 'phone_connect', hostname: 'old.invalid' });
+            result = diagnostics.snapshot('mobile');
+            assert.equal(result.outbound.nodeHttp.requests, 0); assert.equal(result.outbound.nodeHttp.responses, 0);
+            assert.equal(result.bridge.failures, 0); assert.equal(result.stoppedAt, null);
+        } finally { diagnostics.stop(); }
     });
 
     test('runtime route replacement restores original agents, environment and filtering', () => {

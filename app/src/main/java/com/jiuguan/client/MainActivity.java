@@ -4,6 +4,8 @@ import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.ActivityNotFoundException;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
@@ -86,6 +88,9 @@ public class MainActivity extends Activity implements BrowserService.Client {
     private TextView relayStatusView, relayTrafficView;
     private RadioButton dialogMobileMode, dialogComputerMode;
     private Button relayRetryButton;
+    private AlertDialog diagnosticsDialog;
+    private TextView diagnosticsText;
+    private String latestDiagnostics = "";
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final Runnable relayTicker = new Runnable() {
         @Override public void run() {
@@ -227,6 +232,11 @@ public class MainActivity extends Activity implements BrowserService.Client {
         loginSettings.setPadding(0, dp(12), 0, dp(12));
         loginSettings.setOnClickListener(v -> showLoginSettings());
         add(page, loginSettings, 12);
+
+        TextView diagnostics = label("连接诊断（模型连接失败时查看）  ›", 14, MINT);
+        diagnostics.setPadding(0, dp(12), 0, dp(12));
+        diagnostics.setOnClickListener(v -> showDiagnostics());
+        add(page, diagnostics, 4);
 
         TextView battery = label("设置后台运行权限  ›", 14, MINT);
         battery.setPadding(0, dp(16), 0, dp(16));
@@ -493,6 +503,7 @@ public class MainActivity extends Activity implements BrowserService.Client {
         menu.getMenu().add(0, 2, 1, "后台运行设置");
         menu.getMenu().add(0, 6, 2, "账号与自动登录");
         menu.getMenu().add(0, 7, 2, "连接方式：电脑 / 手机流量");
+        menu.getMenu().add(0, 8, 2, "连接诊断");
         menu.getMenu().add(0, 3, 2, "刷新页面…");
         menu.getMenu().add(0, 4, 3, "在浏览器中打开");
         menu.getMenu().add(0, 5, 4, "更换地址 / 断开…");
@@ -527,6 +538,7 @@ public class MainActivity extends Activity implements BrowserService.Client {
                     break;
                 case 6: showLoginSettings(); break;
                 case 7: showRelaySettings(); break;
+                case 8: showDiagnostics(); break;
                 default: break;
             }
             return true;
@@ -568,6 +580,11 @@ public class MainActivity extends Activity implements BrowserService.Client {
             updateRelayDialog();
         });
         add(content, relayRetryButton, 14);
+        Button diagnose = new Button(this);
+        diagnose.setText("连接诊断");
+        diagnose.setAllCaps(false);
+        diagnose.setOnClickListener(v -> showDiagnostics());
+        add(content, diagnose, 6);
         add(content, label("首次使用流量模式：在电脑安装一次配套酒馆插件，然后重启酒馆。打开酒馆并登录后会自动连接。\n\n手机需同时连接局域网 Wi-Fi 和移动数据。切换网络可能中断当前回复，请在本轮结束后操作。", 12, MUTED), 16);
         ScrollView scroll = new ScrollView(this);
         scroll.addView(content);
@@ -614,6 +631,45 @@ public class MainActivity extends Activity implements BrowserService.Client {
         button.setButtonTintList(android.content.res.ColorStateList.valueOf(MINT));
         button.setPadding(0, dp(6), 0, dp(6));
         return button;
+    }
+
+    private void showDiagnostics() {
+        startup.consume();
+        if (service == null) { toast("正在准备客户端，请稍后再试。"); return; }
+        if (diagnosticsDialog != null && diagnosticsDialog.isShowing()) return;
+        diagnosticsText = label("正在读取手机和电脑的连接信息…", 13, TEXT);
+        diagnosticsText.setTextIsSelectable(true);
+        diagnosticsText.setPadding(dp(22), dp(16), dp(22), dp(16));
+        ScrollView scroll = new ScrollView(this);
+        scroll.setBackgroundColor(BG);
+        scroll.addView(diagnosticsText);
+        latestDiagnostics = "";
+        diagnosticsDialog = new AlertDialog.Builder(this).setTitle("连接诊断")
+                .setView(scroll).setPositiveButton("关闭", null)
+                .setNeutralButton("复制诊断", null).setNegativeButton("刷新", null).create();
+        diagnosticsDialog.show();
+        diagnosticsDialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(v -> {
+            if (latestDiagnostics.isEmpty()) return;
+            getSystemService(ClipboardManager.class).setPrimaryClip(ClipData.newPlainText("酒馆连接诊断", latestDiagnostics));
+            toast("诊断已复制：含目标域名和状态，不含请求正文。");
+        });
+        diagnosticsDialog.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener(v -> refreshDiagnostics());
+        refreshDiagnostics();
+    }
+
+    private void refreshDiagnostics() {
+        if (service == null || diagnosticsDialog == null || !diagnosticsDialog.isShowing()) return;
+        AlertDialog current = diagnosticsDialog;
+        current.getButton(AlertDialog.BUTTON_NEGATIVE).setEnabled(false);
+        current.getButton(AlertDialog.BUTTON_NEUTRAL).setEnabled(false);
+        diagnosticsText.setText("正在读取手机和电脑的连接信息…");
+        service.diagnoseRelay(report -> {
+            if (isFinishing() || isDestroyed() || diagnosticsDialog != current || !current.isShowing()) return;
+            latestDiagnostics = report;
+            diagnosticsText.setText(report);
+            current.getButton(AlertDialog.BUTTON_NEGATIVE).setEnabled(true);
+            current.getButton(AlertDialog.BUTTON_NEUTRAL).setEnabled(true);
+        });
     }
 
     @Override public void relayChanged() {
@@ -876,6 +932,7 @@ public class MainActivity extends Activity implements BrowserService.Client {
     @Override protected void onDestroy() {
         ui.removeCallbacksAndMessages(null);
         if (relayDialog != null) relayDialog.dismiss();
+        if (diagnosticsDialog != null) diagnosticsDialog.dismiss();
         if (!isChangingConfigurations() && authHandler != null && service != null) service.cancelAuth(authHandler);
         if (authDialog != null) authDialog.dismiss();
         if (service != null) service.detach(this);

@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import readline from 'node:readline/promises';
 
 const folder = path.dirname(fileURLToPath(import.meta.url));
-export const PLUGIN_FILES = ['package.json', 'index.mjs', 'relay-controller.mjs', 'phone-relay-bridge.mjs'];
+export const PLUGIN_FILES = ['package.json', 'index.mjs', 'relay-controller.mjs', 'phone-relay-bridge.mjs', 'relay-diagnostics.mjs'];
 const NPM_LINE = 'call npm install --no-save --no-audit --no-fund --loglevel=error --no-progress --omit=dev --ignore-scripts';
 const GUARDED_NPM_LINE = 'if not exist "node_modules\\socks\\package.json" ' + NPM_LINE;
 

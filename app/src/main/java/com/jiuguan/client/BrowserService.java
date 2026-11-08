@@ -302,6 +302,21 @@ public class BrowserService extends Service {
     public boolean hasLoadedPage() { return connectionState.hasLoadedPage(); }
     public String connectionMessage() { return connectionState.message(); }
 
+    public void diagnoseRelay(java.util.function.Consumer<String> callback) {
+        String heading = "酒馆口袋 1.3.3 连接诊断\n这里只显示连接阶段和计数，不读取模型密钥或请求正文。\n\n";
+        if (controlOrigin.isEmpty()) {
+            callback.accept(heading + relay.diagnostics() + "\n\n电脑：尚未打开酒馆，请先连接并登录后查看。" );
+            return;
+        }
+        String origin = controlOrigin;
+        String cookie = CookieManager.getInstance().getCookie(origin + "/");
+        pluginClient.diagnose(origin, relayProxyUrl(), cookie, controlAuthorization, result -> {
+            if (destroyed) return;
+            callback.accept(heading + relay.diagnostics() + "\n\n电脑诊断：\n" + result.message
+                    + "\n\n请先在酒馆重现模型列表或发送失败，再刷新诊断。诊断本身不会调用模型。" );
+        });
+    }
+
     /** Only remember an authenticated page with its selected network mode confirmed. */
     public boolean canRememberStartup() {
         return hasLoadedPage() && controlPageReady && (mobileRequested ? isComputerRelayReady()
@@ -399,7 +414,7 @@ public class BrowserService extends Service {
         if (!relayFailure.isEmpty()) return relayFailure;
         if (relay.isReady() && !isRelayReady()) return "正在设置网页的网络连接…";
         if (mobileRequested && isRelayReady()) {
-            if (isComputerRelayReady()) return "手机与电脑已连接，酒馆外网走手机流量";
+            if (isComputerRelayReady()) return "电脑已切换到手机代理；API 连通性请查看“连接诊断”";
             if (!pluginState.error().isEmpty()) return pluginState.error();
             if (!controlPageReady) return "手机中转已就绪，请先登录酒馆，随后会自动连接电脑。";
             return "正在自动连接电脑上的酒馆插件…";

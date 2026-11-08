@@ -9,6 +9,7 @@ import android.net.NetworkCapabilities;
 import android.net.NetworkRequest;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 
 import java.io.Closeable;
 import java.io.IOException;
@@ -36,12 +37,13 @@ public final class CellularRelay implements Closeable {
     public interface Listener { void onRelayChanged(); }
 
     private static final int LAN_PORT = 10808;
-    private static final int CONNECT_TIMEOUT_MS = 10000;
+    private static final int LAN_CONNECT_TIMEOUT_MS = 10000;
     private static final String USERNAME = "jiuguan";
     private static final String TOKEN_SCOPE = "jiuguan-relay\nproxy-v1";
     private final ConnectivityManager connectivity;
     private final CredentialStore credentials;
     private final Listener listener;
+    private final RelayDiagnostics diagnostics = new RelayDiagnostics();
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService builder = Executors.newSingleThreadExecutor(r -> {
         Thread thread = new Thread(r, "JiuguanRelaySetup");
@@ -55,8 +57,8 @@ public final class CellularRelay implements Closeable {
     private volatile String status = "手机流量中转已关闭";
     private volatile String proxyUrl = "";
     private volatile String localProxyRule = "";
-    private Network wifi;
-    private Network cell;
+    private volatile Network wifi;
+    private volatile Network cell;
     private InetAddress wifiAddress;
     private String tavernHost;
     private long requestGeneration;
@@ -91,6 +93,7 @@ public final class CellularRelay implements Closeable {
         status = "正在连接局域网 Wi-Fi 和手机流量…";
         long generation = ++requestGeneration;
         ++revision;
+        diagnostics.networkChanged(revision);
         notifyChanged();
         if (connectivity == null) {
             fail("系统网络服务不可用，无法启动手机流量中转。");
@@ -152,6 +155,45 @@ public final class CellularRelay implements Closeable {
     public long uploadedBytes() { return retiredUploaded + (session == null ? 0 : session.uploadedBytes()); }
     public long downloadedBytes() { return retiredDownloaded + (session == null ? 0 : session.downloadedBytes()); }
     public int activeConnections() { return session == null ? 0 : session.activeConnections(); }
+
+    /** Safe to show or copy: contains no host, pairing secret, URL, payload or exception text. */
+    public String diagnostics() {
+        return "局域网 Wi-Fi：" + networkDiagnostic(wifi)
+                + "\n手机蜂窝网络：" + networkDiagnostic(cell)
+                + "\n（Wi-Fi 未通过系统联网验证，仍可能正常访问局域网。）"
+                + "\nVPN：" + vpnDiagnostic()
+                + "\n本模式直接使用蜂窝网络，绕开 VPN；VPN 的‘阻止不使用 VPN 的连接’可能阻止此出口。"
+                + "\n\n" + diagnostics.summary()
+                + "\n公网连接：IPv4/IPv6 交错，最多 4 个地址，每次最多 3 秒，连接预算共 12 秒。"
+                + "\nDNS 在后台执行并计入预算，但系统 DNS 调用本身无法强制限时；其耗时可能超过 12 秒。"
+                + "\nTCP 已连通只表示网络连接成功，不代表 HTTPS 握手、API 鉴权或模型请求成功。";
+    }
+
+    private String networkDiagnostic(Network network) {
+        if (connectivity == null || network == null) return "尚未获取";
+        try {
+            NetworkCapabilities capabilities = connectivity.getNetworkCapabilities(network);
+            if (capabilities == null) return "已不可用";
+            return "可用；系统联网验证（VALIDATED）："
+                    + (capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) ? "已通过" : "未通过");
+        } catch (RuntimeException e) {
+            return "系统未允许读取状态";
+        }
+    }
+
+    private String vpnDiagnostic() {
+        if (connectivity == null) return "无法读取";
+        try {
+            for (Network network : connectivity.getAllNetworks()) {
+                NetworkCapabilities capabilities = connectivity.getNetworkCapabilities(network);
+                if (capabilities != null && capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN))
+                    return "检测到";
+            }
+            return "未检测到";
+        } catch (RuntimeException e) {
+            return "系统未允许读取状态";
+        }
+    }
 
     private ConnectivityManager.NetworkCallback createCallback(boolean forWifi, long generation) {
         return new ConnectivityManager.NetworkCallback() {
@@ -263,6 +305,7 @@ public final class CellularRelay implements Closeable {
 
     private void invalidateSession() {
         ++revision;
+        diagnostics.networkChanged(revision);
         ready = false;
         // Keep the last loopback rule so a transient outage cannot make WebView silently go direct.
         proxyUrl = "";
@@ -382,35 +425,65 @@ public final class CellularRelay implements Closeable {
             String normalized = normalizeHost(target);
             boolean computer = fromWebView && (normalized.equals(host) || computerAddresses.contains(normalized));
             Network network = computer ? localNetwork : mobileNetwork;
-            // SOCKS5 remote DNS resolution remains on the same network as the outbound socket.
-            InetAddress[] addresses = computer ? computerAddressList.toArray(new InetAddress[0]) : network.getAllByName(target);
-            checkActive();
-            IOException lastError = new IOException("Target is unavailable on the selected network");
-            for (int i = 0; i < Math.min(addresses.length, 4); i++) {
-                InetAddress address = addresses[i];
-                if (!computer && !RelayAddressPolicy.isPublicAddress(address)) continue;
-                checkActive();
-                Socket socket = network.getSocketFactory().createSocket();
-                connectingSockets.add(socket);
-                boolean handedOver = false;
-                try {
+            RelayDiagnostics.Attempt attempt = diagnostics.begin(expectedRevision, computer
+                    ? RelayDiagnostics.Route.LAN_PAGE : fromWebView
+                    ? RelayDiagnostics.Route.PAGE_PUBLIC : RelayDiagnostics.Route.COMPUTER_PUBLIC);
+            try {
+                final Socket connected;
+                if (computer) {
+                    connected = connectComputer(network, port, attempt);
+                } else {
+                    // Start before DNS so slow resolution cannot be followed by another full TCP budget.
+                    // Android's network-specific DNS call itself cannot be forcibly time limited here.
+                    RelayConnectPlan plan = new RelayConnectPlan(SystemClock::elapsedRealtime);
+                    InetAddress[] addresses = network.getAllByName(target);
                     checkActive();
-                    socket.connect(new InetSocketAddress(address, port), CONNECT_TIMEOUT_MS);
-                    checkActive();
-                    handedOver = true;
-                    return socket;
-                } catch (IOException e) {
-                    lastError = e;
-                } finally {
-                    connectingSockets.remove(socket);
-                    if (!handedOver) closeSocket(socket);
+                    diagnostics.resolved(attempt, addresses);
+                    connected = plan.connect(addresses, this::checkActive, (address, timeout) -> {
+                        diagnostics.connecting(attempt, address);
+                        return openSocket(network, address, port, timeout);
+                    });
                 }
+                diagnostics.connected(attempt, connected.getInetAddress());
+                return connected;
+            } catch (IOException | RuntimeException e) {
+                diagnostics.failed(attempt, e);
+                throw e;
+            }
+        }
+
+        private Socket connectComputer(Network network, int port, RelayDiagnostics.Attempt attempt) throws IOException {
+            IOException lastError = new IOException("Computer is unavailable on the local network");
+            for (int i = 0; i < Math.min(computerAddressList.size(), 4); i++) {
+                checkActive();
+                InetAddress address = computerAddressList.get(i);
+                diagnostics.connecting(attempt, address);
+                try { return openSocket(network, address, port, LAN_CONNECT_TIMEOUT_MS); }
+                catch (IOException e) { lastError = e; }
             }
             throw lastError;
         }
 
+        private Socket openSocket(Network network, InetAddress address, int port, int timeout) throws IOException {
+            checkActive();
+            Socket socket = network.getSocketFactory().createSocket();
+            connectingSockets.add(socket);
+            boolean handedOver = false;
+            try {
+                checkActive();
+                socket.connect(new InetSocketAddress(address, port), timeout);
+                checkActive();
+                handedOver = true;
+                return socket;
+            } finally {
+                connectingSockets.remove(socket);
+                if (!handedOver) closeSocket(socket);
+            }
+        }
+
         private void checkActive() throws IOException {
-            if (!active || !enabled || closed || revision != expectedRevision) throw new IOException("Relay network changed");
+            if (!active || !enabled || closed || revision != expectedRevision)
+                throw new RelayConnectPlan.NetworkChangedException();
         }
 
         long uploadedBytes() { return lan.uploadedBytes() + local.uploadedBytes(); }

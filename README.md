@@ -8,13 +8,15 @@
 
 > **前提：断的是外网，手机和电脑之间的局域网仍然互通。** 如果学校同时关闭 Wi-Fi、断开内网，或启用了设备隔离，手机无法访问电脑，本方案也无法连接。无需开启手机热点。
 
-当前版本：**1.3.2**，适用于 Android 8.0 及以上。项目处于早期测试阶段。
+普通下载版：**1.3.2**；最新预发布为 **1.3.3 诊断测试版**，适用于 Android 8.0 及以上。项目处于早期测试阶段。
 
 ## 下载
 
 - [安卓安装包 APK](https://github.com/Marco0431/jiuguan-pocket/releases/latest/download/jiuguan-pocket-1.3.2.apk)
 - [电脑插件安装包 ZIP](https://github.com/Marco0431/jiuguan-pocket/releases/latest/download/jiuguan-server-plugin.zip)
 - [全部版本与更新说明](https://github.com/Marco0431/jiuguan-pocket/releases)
+
+遇到“能打开酒馆，但模型列表或发送失败”，请使用 [1.3.3 诊断测试版](https://github.com/Marco0431/jiuguan-pocket/releases/tag/v1.3.3) 中的 APK 和插件；两端均需更新。此版修正地址重试超时并提供分层诊断，尚未确认能解决用户反馈的 `Bad Request`。
 
 APK 为自行安装的调试签名测试版。目前发布包沿用同一签名，可以覆盖更新；自行构建换用其他签名时，可能需要卸载原版，卸载会清除客户端保存的信息。
 
@@ -66,6 +68,16 @@ APK 为自行安装的调试签名测试版。目前发布包沿用同一签名�
 - **导入导出**：使用系统文件选择器导入角色卡等文件；支持 Blob / data 导出，单文件上限 16 MiB。
 - **失败后自己决定重试**：不会自动重发模型生成请求，避免重复生成和额外 API 消耗。
 
+## 能打开酒馆，但模型列表或发送失败
+
+“手机与电脑已连接”只表示配对和代理设置完成，不能证明手机能访问所选 API。单独的 `Bad Request` 也不足以判断出错环节。
+
+1.3.3 增加了「连接诊断」。同时更新手机 APK 和电脑插件并重启酒馆后，先重现一次失败，再从「更多」→「连接诊断」→「刷新」→「复制诊断」取得报告。配置页也有诊断入口，读取诊断不会发送模型请求。
+
+报告区分手机 DNS／TCP 失败、电脑代理连接失败和上游 HTTP 响应。它只包含网络状态、目标域名、状态码和计数，不包含账号密码、API 密钥、URL 路径、请求头或聊天正文。隧道建立成功只代表 TCP 可达；上游返回 400 时，还需要核对 API 配置或服务端报错。
+
+本版修正了公网地址重试可能超过电脑等待上限的问题：IPv4/IPv6 交错尝试，每次最多 3 秒、最多 4 个地址，DNS 耗时计入 12 秒连接预算。系统 DNS 调用本身不能强制限时。此修正尚不能证明已解决所有 `Bad Request`，仍需实际手机网络上的诊断结果。
+
 ## 适用范围
 
 手机模式覆盖酒馆标准 HTTP/HTTPS 请求、聊天 API、资源下载、Node 原生 `fetch`、继承代理环境的 Git HTTPS/npm，以及经过代理的 WebSocket。手机网页访问电脑仍走 Wi-Fi，公开外网资源走蜂窝网络。电脑其他软件和另开的电脑浏览器不会自动改用手机流量。
@@ -90,6 +102,6 @@ Windows PowerShell 在项目目录运行：
 
 脚本会构建 APK、运行单元测试和 Android Lint，并生成插件 ZIP；输出位于 `dist/`。也可直接运行 `gradlew.bat assembleDebug testDebugUnitTest lintDebug`。
 
-1.3.2 已通过 **50 项 Android JVM 测试、30 项 Node.js 测试**、APK 构建与签名检查，Android Lint 为 0 errors / 5 warnings。双网络路由、自动配对和锁屏稳定性仍需真机验收，尚未完成各品牌安卓设备验证。测试方法见 [测试说明](tools/TESTING.md)，检查记录见 [VALIDATION.md](VALIDATION.md)。
+1.3.3 已通过 **61 项 Android JVM 测试、33 项 Node.js 测试**、离线 HTTPS 转发测试、APK 构建与签名检查，Android Lint 为 0 errors / 5 warnings。双网络路由、自动配对和锁屏稳定性仍需真机验收，尚未完成各品牌安卓设备验证。测试方法见 [测试说明](tools/TESTING.md)，检查记录见 [VALIDATION.md](VALIDATION.md)。
 
 项目代码使用 [MIT License](LICENSE)。这是面向现有 SillyTavern 的独立客户端和配套插件，与 SillyTavern 官方无隶属关系。

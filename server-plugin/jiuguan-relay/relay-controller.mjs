@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import http from 'node:http';
 import https from 'node:https';
 import { parsePhoneUrl, buildEnvironment } from './phone-relay-bridge.mjs';
+import { RelayDiagnostics } from './relay-diagnostics.mjs';
 
 export class RelayError extends Error {
     constructor(status, message) { super(message); this.status = status; }
@@ -66,12 +67,13 @@ function owns(first, second) {
 
 /** Serializes only explicit control changes; it never retries application requests. */
 export class RelayController {
-    constructor({ probe, bridgeFactory, routing, supported = true, message = '' }) {
+    constructor({ probe, bridgeFactory, routing, diagnostics = new RelayDiagnostics(), supported = true, message = '' }) {
         this.probe = probe;
         this.bridgeFactory = bridgeFactory;
         this.routing = routing;
         this.supported = supported;
         this.message = message;
+        this.diagnostics = diagnostics;
         this.active = null;
         this.queue = Promise.resolve();
         this.closed = false;
@@ -81,6 +83,11 @@ export class RelayController {
         profileHandle(request);
         return { protocol: 1, mode: this.active ? 'mobile' : 'normal', supported: this.supported,
             ...(this.message ? { message: this.message } : {}) };
+    }
+
+    diagnosticStatus(request) {
+        profileHandle(request);
+        return this.diagnostics.snapshot(this.active ? 'mobile' : 'normal');
     }
 
     exclusive(operation) {
@@ -110,6 +117,7 @@ export class RelayController {
             }
             const previous = this.active;
             this.active = { owner, phone, bridge: replacement };
+            this.diagnostics.start(replacement.diagnosticId);
             if (previous) await previous.bridge.close();
             return { ok: true, mode: 'mobile' };
         });
@@ -122,6 +130,7 @@ export class RelayController {
             if (this.active) {
                 const previous = this.active;
                 this.routing.restore();
+                this.diagnostics.stop();
                 this.active = null;
                 await previous.bridge.close();
             }
@@ -135,6 +144,7 @@ export class RelayController {
             const previous = this.active;
             this.active = null;
             this.routing?.restore();
+            this.diagnostics.stop();
             if (previous) await previous.bridge.close();
         });
     }
@@ -223,6 +233,7 @@ export function registerRoutes(router, controller) {
         }
     };
     router.get('/status', run(request => controller.status(request)));
+    router.get('/diagnostics', run(request => controller.diagnosticStatus(request)));
     router.post('/enable', run(request => controller.enable(request)));
     router.post('/disable', run(request => controller.disable(request)));
 }

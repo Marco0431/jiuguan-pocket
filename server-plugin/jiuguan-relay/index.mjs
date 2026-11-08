@@ -4,6 +4,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createBridge, probePhone } from './phone-relay-bridge.mjs';
 import { RelayController, RuntimeRouting, registerRoutes } from './relay-controller.mjs';
+import { RelayDiagnostics } from './relay-diagnostics.mjs';
 
 export const info = {
     id: 'jiuguan-relay',
@@ -14,6 +15,7 @@ export const info = {
 let controller;
 
 export async function init(router) {
+    const diagnostics = new RelayDiagnostics();
     let dependencies;
     let message = '';
     try {
@@ -29,7 +31,7 @@ export async function init(router) {
         }
         dependencies = {
             probe: probePhone,
-            bridgeFactory: phone => createBridge({ phone, SocksClient, localDirect: false }),
+            bridgeFactory: phone => createBridge({ phone, SocksClient, localDirect: false, diagnostics }),
             routing: new RuntimeRouting({ filter: {
                 isDelegated: () => filter.getUntrustedRequestAgent() === undefined,
                 setDelegated: delegated => filter.default({ listen: false, enabled: false, requestProxyEnabled: delegated }),
@@ -39,7 +41,7 @@ export async function init(router) {
         message = /^需要 Node\.js|^当前酒馆版本/.test(error.message) ? error.message
             : '手机流量插件依赖不完整，请重新安装插件或更新酒馆依赖。';
     }
-    controller = new RelayController({ ...dependencies, supported: !!dependencies, message });
+    controller = new RelayController({ ...dependencies, diagnostics, supported: !!dependencies, message });
     registerRoutes(router, controller);
 }
 

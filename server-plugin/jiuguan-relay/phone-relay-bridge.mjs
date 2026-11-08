@@ -116,7 +116,9 @@ export async function probePhone(phone, { timeoutMs = 1200 } = {}) {
 }
 
 /** Loopback-only HTTP + CONNECT adapter. Never retries a request or decrypts TLS. */
-export async function createBridge({ phone, SocksClient, connector, localDirect = true } = {}) {
+export async function createBridge({ phone, SocksClient, connector, localDirect = true, diagnostics } = {}) {
+    const diagnosticId = {};
+    const diagnostic = (event, details) => diagnostics?.bridgeEvent(diagnosticId, event, details);
     const sockets = new Set();
     let closing = false;
     const track = socket => {
@@ -137,26 +139,30 @@ export async function createBridge({ phone, SocksClient, connector, localDirect 
         return socket;
     };
     const server = http.createServer({ maxHeaderSize: 32 * 1024 }, async (request, response) => {
+        diagnostic('http_request');
         let target;
         try {
             target = new URL(request.url);
             if (target.protocol !== 'http:' || target.username || target.password) throw new Error('Invalid target');
-        } catch { response.writeHead(400).end(); return; }
+        } catch { diagnostic('failure', { phase: 'format' }); response.writeHead(400).end(); return; }
         let socket;
         try { socket = await connect(target.hostname.replace(/^\[|\]$/g, ''), +(target.port || 80)); }
-        catch { response.writeHead(502).end('手机中转不可用，请检查手机网络和中转开关。'); return; }
+        catch { diagnostic('failure', { phase: 'phone_connect', hostname: target.hostname }); response.writeHead(502).end('手机中转不可用，请检查手机网络和中转开关。'); return; }
         if (request.destroyed || response.destroyed) { socket.destroy(); return; }
         const agent = new http.Agent({ keepAlive: false });
+        diagnostics?.ignoreAgent(agent);
         agent.createConnection = (_options, callback) => { callback(null, socket); };
         const upstream = http.request({ protocol: 'http:', hostname: target.hostname, port: target.port || 80,
             method: request.method, path: target.pathname + target.search, agent,
             headers: cleanHeaders(request.headers, target.host) });
+        diagnostic('http_forwarded');
         upstream.on('response', incoming => {
             response.writeHead(incoming.statusCode, cleanHeaders(incoming.headers));
             incoming.on('error', () => response.destroy());
             incoming.pipe(response);
         });
         upstream.on('error', () => {
+            diagnostic('failure', { phase: 'upstream_io', hostname: target.hostname });
             if (!response.headersSent) response.writeHead(502).end('手机中转连接已中断。');
             else response.destroy();
         });
@@ -166,6 +172,7 @@ export async function createBridge({ phone, SocksClient, connector, localDirect 
         request.pipe(upstream);
     });
     const tunnel = async (request, client, head, upgrade) => {
+        diagnostic(upgrade ? 'http_request' : 'connect_request');
         client.pause();
         let destination, target;
         try {
@@ -174,10 +181,10 @@ export async function createBridge({ phone, SocksClient, connector, localDirect 
                 if (!['http:', 'ws:'].includes(target.protocol) || target.username || target.password) throw new Error();
                 destination = { host: target.hostname.replace(/^\[|\]$/g, ''), port: +(target.port || 80) };
             } else destination = authority(request.url);
-        } catch { rawError(client, 400); return; }
+        } catch { diagnostic('failure', { phase: 'format' }); rawError(client, 400); return; }
         let remote;
         try { remote = await connect(destination.host, destination.port); }
-        catch { rawError(client); return; }
+        catch { diagnostic('failure', { phase: 'phone_connect', hostname: destination.host }); rawError(client); return; }
         if (client.destroyed) { remote.destroy(); return; }
         const cleanup = () => { client.destroy(); remote.destroy(); };
         client.on('error', cleanup); remote.on('error', cleanup);
@@ -189,6 +196,7 @@ export async function createBridge({ phone, SocksClient, connector, localDirect 
             remote.write(`${request.method} ${target.pathname}${target.search} HTTP/1.1\r\n` +
                 Object.entries(headers).map(([key, value]) => `${key}: ${Array.isArray(value) ? value.join(', ') : value}`).join('\r\n') + '\r\n\r\n');
         } else client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+        diagnostic(upgrade ? 'http_forwarded' : 'tunnel_established');
         if (head.length) remote.write(head);
         client.pipe(remote); remote.pipe(client); client.resume();
     };
@@ -197,7 +205,7 @@ export async function createBridge({ phone, SocksClient, connector, localDirect 
     server.on('connection', socket => {
         track(socket); socket.setTimeout(IDLE_TIMEOUT, () => socket.destroy());
     });
-    server.on('clientError', (_error, socket) => rawError(socket, 400));
+    server.on('clientError', (_error, socket) => { diagnostic('failure', { phase: 'format' }); rawError(socket, 400); });
     server.maxConnections = 64;
     server.requestTimeout = 0;
     server.headersTimeout = 20_000;
@@ -205,6 +213,7 @@ export async function createBridge({ phone, SocksClient, connector, localDirect 
     server.listen(0, '127.0.0.1');
     await once(server, 'listening');
     return {
+        diagnosticId,
         url: `http://127.0.0.1:${server.address().port}`,
         async close() {
             closing = true;

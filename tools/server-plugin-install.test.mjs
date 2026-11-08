@@ -73,7 +73,7 @@ test('plan is read-only and install backs up originals, preserves unowned files 
     const pluginTarget = path.join(f.tavern, 'plugins/jiuguan-relay'); fs.mkdirSync(pluginTarget, { recursive: true });
     fs.writeFileSync(path.join(pluginTarget, 'user-settings.json'), '{"keep":true}');
     const plan = f.plan();
-    assert.equal(plan.edits.length, 6);
+    assert.equal(plan.edits.length, 7);
     assert.equal(fs.readFileSync(path.join(f.tavern, 'config.yaml'), 'utf8'), originalConfig);
     assert.equal(fs.existsSync(path.join(f.tavern, 'backups/jiuguan-relay-install')), false);
     const result = applyInstallPlan(plan); assert.equal(result.changed, true);
@@ -88,14 +88,34 @@ test('plan is read-only and install backs up originals, preserves unowned files 
 
 test('missing source file and unsupported startup fail before mutation', t => {
     const f = fixture(t);
-    fs.unlinkSync(path.join(f.source, 'relay-controller.mjs'));
+    fs.unlinkSync(path.join(f.source, 'relay-diagnostics.mjs'));
     assert.throws(f.plan, /插件安装包不完整/);
     assert.equal(fs.existsSync(path.join(f.tavern, 'backups/jiuguan-relay-install')), false);
     assert.equal(fs.readFileSync(path.join(f.tavern, 'config.yaml'), 'utf8'), originalConfig);
-    fs.writeFileSync(path.join(f.source, 'relay-controller.mjs'), '// fixture\n');
+    fs.writeFileSync(path.join(f.source, 'relay-diagnostics.mjs'), '// fixture\n');
     fs.writeFileSync(path.join(f.tavern, 'Start.bat'), 'call npm ci\r\nnode server.js\r\n');
     assert.throws(f.plan, /Start.bat/);
     assert.equal(fs.existsSync(path.join(f.tavern, 'plugins')), false);
+});
+
+test('upgrade from four-file plugin adds diagnostics without requiring an installed copy', t => {
+    const f = fixture(t);
+    const pluginTarget = path.join(f.tavern, 'plugins/jiuguan-relay');
+    fs.mkdirSync(pluginTarget, { recursive: true });
+    fs.writeFileSync(path.join(f.tavern, 'config.yaml'), patchConfiguration(originalConfig, yaml));
+    fs.writeFileSync(path.join(f.tavern, 'Start.bat'), patchStartup(originalStartup));
+    for (const file of ['package.json', 'index.mjs', 'relay-controller.mjs', 'phone-relay-bridge.mjs']) {
+        fs.copyFileSync(path.join(f.source, file), path.join(pluginTarget, file));
+    }
+    const plan = f.plan();
+    assert.deepEqual(plan.edits.map(edit => edit.relative), [path.join('plugins', 'jiuguan-relay', 'relay-diagnostics.mjs')]);
+    assert.equal(plan.edits[0].before, null);
+    const result = applyInstallPlan(plan);
+    assert.deepEqual(fs.readFileSync(path.join(pluginTarget, 'relay-diagnostics.mjs')),
+        fs.readFileSync(path.join(f.source, 'relay-diagnostics.mjs')));
+    const manifest = JSON.parse(fs.readFileSync(path.join(result.backupDirectory, 'manifest.json'), 'utf8'));
+    assert.equal(manifest.files[0].existed, false);
+    assert.equal(f.plan().edits.length, 0);
 });
 
 test('concurrent edits abort before backups or writes', t => {
