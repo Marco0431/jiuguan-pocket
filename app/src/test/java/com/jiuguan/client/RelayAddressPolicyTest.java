@@ -5,6 +5,31 @@ import java.net.InetAddress;
 import static org.junit.Assert.*;
 
 public class RelayAddressPolicyTest {
+    @Test public void fakeIpRangeNeedsVpnOptInWithoutAllowingOtherPrivateDestinations() throws Exception {
+        for (String address : new String[]{"198.18.0.0", "198.18.0.1", "198.19.255.255"}) {
+            InetAddress ip = InetAddress.getByName(address);
+            assertFalse(address, RelayAddressPolicy.isAllowedDestination(ip, false));
+            assertTrue(address, RelayAddressPolicy.isAllowedDestination(ip, true));
+        }
+        for (String address : new String[]{"10.0.0.1", "127.0.0.1", "169.254.169.254", "172.16.0.1",
+                "192.168.1.1", "100.64.0.1", "198.51.100.1", "::1", "fc00::1", "fdab::1",
+                "fe80::1", "64:ff9b::c612:1"})
+            assertFalse(address, RelayAddressPolicy.isAllowedDestination(InetAddress.getByName(address), true));
+        assertFalse(RelayAddressPolicy.isAllowedDestination(null, true));
+        assertTrue(RelayAddressPolicy.isAllowedDestination(InetAddress.getByName("8.8.8.8"), false));
+    }
+
+    @Test public void fakeIpOptInRequiresPublicDomainSyntaxRatherThanAnIpOrLocalName() {
+        for (String host : new String[]{"oauth2.googleapis.com", "API.Example.COM.", "api.xn--fiqs8s"})
+            assertTrue(host, RelayAddressPolicy.allowsVpnFakeIpHost(host));
+        for (String host : new String[]{null, "", "localhost", "router", "router.lan", "printer.local",
+                "api.localhost", "api.internal", "api.intranet", "device.home", "device.home.arpa",
+                "198.18.0.1", "127.1", "2130706433", "0177.0.0.1", "0x7f000001", "1.0x7f000001",
+                "[::1]", "fc00::1", "https://api.example.com", "user@api.example.com", "api.example.com:443",
+                "api..example.com", "-api.example.com", "api-.example.com", " api.example.com", "api.example.com "})
+            assertFalse(String.valueOf(host), RelayAddressPolicy.allowsVpnFakeIpHost(host));
+    }
+
     @Test public void rejectsPrivateLocalAndSpecialIpv4() throws Exception {
         for (String address : new String[]{"0.0.0.0", "0.1.2.3", "10.0.0.1", "127.0.0.1",
                 "169.254.169.254", "172.16.0.1", "172.31.255.255", "192.168.1.1",

@@ -177,7 +177,7 @@ public class MainActivity extends Activity implements BrowserService.Client {
         boolean mobile = service != null && service.isRelayEnabled() || prefs.getBoolean("relay", false);
         modes.check(mobile ? mobileModeButton.getId() : computerModeButton.getId());
         add(form, modes, 6);
-        add(form, label("电脑能上网：选电脑网络。\n电脑只有内网：选手机流量，手机同时开启 Wi-Fi 和移动数据。", 12, MUTED), 4);
+        add(form, label("电脑能上网：选电脑网络。\n电脑只有内网：选手机流量，手机同时开启 Wi-Fi 和移动数据。\n需要代理的 API：先开启手机代理，本应用会优先使用它的出口。", 12, MUTED), 4);
         add(form, label("酒馆地址", 14, TEXT), 20);
         addressInput = new EditText(this);
         addressInput.setSingleLine(true);
@@ -585,7 +585,7 @@ public class MainActivity extends Activity implements BrowserService.Client {
         diagnose.setAllCaps(false);
         diagnose.setOnClickListener(v -> showDiagnostics());
         add(content, diagnose, 6);
-        add(content, label("首次使用流量模式：在电脑安装一次配套酒馆插件，然后重启酒馆。打开酒馆并登录后会自动连接。\n\n手机需同时连接局域网 Wi-Fi 和移动数据。切换网络可能中断当前回复，请在本轮结束后操作。", 12, MUTED), 16);
+        add(content, label("首次使用流量模式：在电脑安装一次配套酒馆插件，然后重启酒馆。打开酒馆并登录后会自动连接。\n\n手机需同时连接局域网 Wi-Fi 和移动数据。已开启且覆盖本应用的手机代理会优先用于外网；代理实际使用流量还是 Wi-Fi 由代理和系统决定。校园网断网时，请先确认手机代理本身能用。\n\n切换网络或代理可能中断当前回复，请在本轮结束后操作。", 12, MUTED), 16);
         ScrollView scroll = new ScrollView(this);
         scroll.addView(content);
         relayDialog = new AlertDialog.Builder(this).setTitle("连接方式")

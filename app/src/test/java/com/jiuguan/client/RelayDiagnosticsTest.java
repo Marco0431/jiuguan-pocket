@@ -65,6 +65,19 @@ public class RelayDiagnosticsTest {
         assertFalse(text.contains("超时"));
     }
 
+    @Test public void diagnosticFilteringMatchesVpnFakeIpOptIn() throws Exception {
+        RelayDiagnostics diagnostics = new RelayDiagnostics();
+        diagnostics.networkChanged(1);
+        InetAddress fake = InetAddress.getByAddress(new byte[]{(byte) 198, 18, 0, 1});
+        InetAddress privateAddress = InetAddress.getByAddress(new byte[]{10, 0, 0, 1});
+        RelayDiagnostics.Attempt direct = diagnostics.begin(1, RelayDiagnostics.Route.COMPUTER_PUBLIC);
+        diagnostics.resolved(direct, new InetAddress[]{fake, privateAddress});
+        assertTrue(diagnostics.summary().contains("策略过滤 2"));
+        RelayDiagnostics.Attempt vpn = diagnostics.begin(1, RelayDiagnostics.Route.COMPUTER_PUBLIC);
+        diagnostics.resolved(vpn, new InetAddress[]{fake, privateAddress}, true);
+        assertTrue(diagnostics.summary().contains("IPv4 2，IPv6 0；策略过滤 1"));
+    }
+
     @Test public void failureCategoriesAreActionableWithoutRawExceptions() {
         assertEquals(RelayDiagnostics.Stage.DNS_FAILED,
                 RelayDiagnostics.failureStage(new UnknownHostException("eacces.example")));

@@ -129,6 +129,48 @@ public class RelayConnectPlanTest {
         assertEquals(1, calls[0]);
     }
 
+    @Test public void vpnFakeIpCanConnectButDefaultPlanAndPrivateAddressesRemainBlocked() throws Exception {
+        InetAddress fake = InetAddress.getByAddress(new byte[]{(byte) 198, 18, 0, 1});
+        InetAddress privateAddress = InetAddress.getByAddress(new byte[]{10, 0, 0, 1});
+        RelayConnectPlan plan = new RelayConnectPlan(new FakeClock());
+        try {
+            plan.connect(new InetAddress[]{fake}, () -> { }, (address, timeout) -> {
+                fail("Cellular mode must not dial fake IP"); return null;
+            });
+            fail("Default plan accepted fake IP");
+        } catch (RelayConnectPlan.AddressRejectedException expected) { }
+        boolean allowFakeIp = RelayAddressPolicy.allowsVpnFakeIpHost("oauth2.googleapis.com");
+        try (Socket success = new Socket()) {
+            assertSame(success, plan.connect(new InetAddress[]{privateAddress, fake, fake}, () -> { }, (address, timeout) -> {
+                assertEquals(fake, address);
+                assertEquals(3_000, timeout);
+                return success;
+            }, allowFakeIp));
+        }
+        assertEquals(Arrays.asList(fake), RelayConnectPlan.candidates(new InetAddress[]{privateAddress, fake, fake}, true));
+    }
+
+    @Test public void vpnFakeIpStillUsesRemainingBudgetAndRejectsAnExpiredResolution() throws Exception {
+        InetAddress fake = InetAddress.getByAddress(new byte[]{(byte) 198, 19, 0, 2});
+        FakeClock clock = new FakeClock();
+        RelayConnectPlan plan = new RelayConnectPlan(clock);
+        clock.now = 11_500;
+        try {
+            plan.connect(new InetAddress[]{fake}, () -> { }, (address, timeout) -> {
+                assertEquals(500, timeout);
+                clock.now += timeout;
+                throw new SocketTimeoutException();
+            }, true);
+            fail("Timed-out VPN destination succeeded");
+        } catch (SocketTimeoutException expected) { }
+        try {
+            plan.connect(new InetAddress[]{fake}, () -> { }, (address, timeout) -> {
+                fail("VPN must not bypass expired DNS/connection budget"); return null;
+            }, true);
+            fail("Expired VPN plan succeeded");
+        } catch (SocketTimeoutException expected) { }
+    }
+
     private static InetAddress ipv4(int suffix) throws IOException {
         return InetAddress.getByAddress(new byte[]{8, 8, 8, (byte) suffix});
     }

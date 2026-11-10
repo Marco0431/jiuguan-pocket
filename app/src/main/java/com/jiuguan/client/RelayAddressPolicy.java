@@ -1,10 +1,38 @@
 package com.jiuguan.client;
 
 import java.net.InetAddress;
+import java.util.Locale;
 
 /** Applies to each resolved destination before connecting, including IPv4 embedded in IPv6. */
 public final class RelayAddressPolicy {
     private RelayAddressPolicy() { }
+
+    /** Caller may opt in only for DNS answers obtained on the selected VPN Network. */
+    public static boolean isAllowedDestination(InetAddress address, boolean allowVpnFakeIp) {
+        if (isPublicAddress(address)) return true;
+        if (!allowVpnFakeIp || address == null) return false;
+        byte[] bytes = address.getAddress();
+        return bytes.length == 4 && (bytes[0] & 255) == 198
+                && ((bytes[1] & 255) == 18 || (bytes[1] & 255) == 19);
+    }
+
+    /** Syntax only: no DNS lookup, IP literals, single-label names or local-name exceptions. */
+    public static boolean allowsVpnFakeIpHost(String target) {
+        if (target == null || target.isEmpty()) return false;
+        String host = target.toLowerCase(Locale.ROOT);
+        if (host.endsWith(".")) host = host.substring(0, host.length() - 1);
+        if (host.length() > 253 || host.indexOf('.') < 1) return false;
+        for (String suffix : new String[]{"localhost", "local", "lan", "internal", "intranet", "home", "home.arpa"}) {
+            if (host.equals(suffix) || host.endsWith("." + suffix)) return false;
+        }
+        String[] labels = host.split("\\.", -1);
+        for (String label : labels) {
+            if (label.length() > 63 || !label.matches("[a-z0-9](?:[a-z0-9-]*[a-z0-9])?")) return false;
+        }
+        String tld = labels[labels.length - 1];
+        // Alphabetic/punycode TLDs exclude inet_aton-style hexadecimal and octal IP variants too.
+        return tld.matches("[a-z]{2,63}") || tld.matches("xn--[a-z0-9](?:[a-z0-9-]*[a-z0-9])?");
+    }
 
     public static boolean isPublicAddress(InetAddress address) {
         if (address == null || address.isAnyLocalAddress() || address.isLoopbackAddress()

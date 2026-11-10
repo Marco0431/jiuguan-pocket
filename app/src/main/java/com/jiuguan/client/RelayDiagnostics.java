@@ -52,12 +52,16 @@ final class RelayDiagnostics {
     }
 
     synchronized void resolved(Attempt attempt, InetAddress[] addresses) {
+        resolved(attempt, addresses, false);
+    }
+
+    synchronized void resolved(Attempt attempt, InetAddress[] addresses, boolean allowVpnFakeIp) {
         if (!current(attempt)) return;
         attempt.stage = Stage.RESOLVED;
         for (InetAddress address : addresses) {
             if (address instanceof Inet4Address) attempt.ipv4++;
             else if (address != null) attempt.ipv6++;
-            if (!RelayAddressPolicy.isPublicAddress(address)) attempt.rejected++;
+            if (!RelayAddressPolicy.isAllowedDestination(address, allowVpnFakeIp)) attempt.rejected++;
         }
     }
 

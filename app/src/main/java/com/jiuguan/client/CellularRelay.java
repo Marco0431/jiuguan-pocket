@@ -32,7 +32,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-/** Keeps independent Wi-Fi and cellular networks; never changes process-wide routing. */
+/** Keeps LAN Wi-Fi separate from cellular or the app's active VPN; never binds the whole process. */
 public final class CellularRelay implements Closeable {
     public interface Listener { void onRelayChanged(); }
 
@@ -44,6 +44,7 @@ public final class CellularRelay implements Closeable {
     private final CredentialStore credentials;
     private final Listener listener;
     private final RelayDiagnostics diagnostics = new RelayDiagnostics();
+    private final RelayRoutePolicy<Network> routes = new RelayRoutePolicy<>();
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService builder = Executors.newSingleThreadExecutor(r -> {
         Thread thread = new Thread(r, "JiuguanRelaySetup");
@@ -65,6 +66,8 @@ public final class CellularRelay implements Closeable {
     private boolean building;
     private ConnectivityManager.NetworkCallback wifiCallback;
     private ConnectivityManager.NetworkCallback cellCallback;
+    private ConnectivityManager.NetworkCallback defaultCallback;
+    private NetworkCapabilities defaultCapabilities;
     private RelaySession session;
     private long retiredUploaded;
     private long retiredDownloaded;
@@ -101,7 +104,15 @@ public final class CellularRelay implements Closeable {
         }
         wifiCallback = createCallback(true, generation);
         cellCallback = createCallback(false, generation);
+        defaultCallback = createDefaultCallback(generation);
         try {
+            // The initial snapshot is outside callbacks. Later state comes only from ordered events.
+            Network initialDefault = connectivity.getActiveNetwork();
+            defaultCapabilities = initialDefault == null ? null : connectivity.getNetworkCapabilities(initialDefault);
+            routes.seed(initialDefault, defaultCapabilities != null,
+                    defaultCapabilities != null && defaultCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN),
+                    defaultCapabilities != null && defaultCapabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET));
+            connectivity.registerDefaultNetworkCallback(defaultCallback, main);
             NetworkRequest wifiRequest = new NetworkRequest.Builder()
                     .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
                     .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
@@ -161,8 +172,9 @@ public final class CellularRelay implements Closeable {
         return "局域网 Wi-Fi：" + networkDiagnostic(wifi)
                 + "\n手机蜂窝网络：" + networkDiagnostic(cell)
                 + "\n（Wi-Fi 未通过系统联网验证，仍可能正常访问局域网。）"
-                + "\nVPN：" + vpnDiagnostic()
-                + "\n本模式直接使用蜂窝网络，绕开 VPN；VPN 的‘阻止不使用 VPN 的连接’可能阻止此出口。"
+                + "\n" + outboundDiagnostic()
+                + "\nVPN 底层由代理应用选择；酒馆口袋保持蜂窝可用，但不能替其他 VPN 强制选择流量。"
+                + "\nVPN 需包含酒馆口袋，并允许访问局域网；严格阻止非 VPN 连接可能影响电脑连接。"
                 + "\n\n" + diagnostics.summary()
                 + "\n公网连接：IPv4/IPv6 交错，最多 4 个地址，每次最多 3 秒，连接预算共 12 秒。"
                 + "\nDNS 在后台执行并计入预算，但系统 DNS 调用本身无法强制限时；其耗时可能超过 12 秒。"
@@ -181,18 +193,61 @@ public final class CellularRelay implements Closeable {
         }
     }
 
-    private String vpnDiagnostic() {
-        if (connectivity == null) return "无法读取";
-        try {
-            for (Network network : connectivity.getAllNetworks()) {
-                NetworkCapabilities capabilities = connectivity.getNetworkCapabilities(network);
-                if (capabilities != null && capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN))
-                    return "检测到";
-            }
-            return "未检测到";
-        } catch (RuntimeException e) {
-            return "系统未允许读取状态";
+    private String outboundDiagnostic() {
+        RelayRoutePolicy.Selection<Network> selected = routes.select(cell);
+        switch (selected.kind) {
+            case VPN:
+                String transports = defaultCapabilities == null ? "未知"
+                        : (defaultCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) ? "蜂窝 " : "")
+                        + (defaultCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ? "Wi-Fi " : "");
+                return "当前公网出口：本应用的活动 VPN\nVPN 网络：" + networkDiagnostic(selected.network)
+                        + "\nVPN 报告的底层传输：" + (transports.trim().isEmpty() ? "未报告" : transports.trim());
+            case WAIT_DEFAULT: return "当前公网出口：等待系统默认网络信息；尚未选择出口";
+            case WAIT_VPN: return "当前公网出口：VPN 暂不可用或被系统阻止；未回退蜂窝直连";
+            case WAIT_CELLULAR: return "当前公网出口：等待蜂窝网络";
+            default: return "当前公网出口：蜂窝直连；未检测到覆盖本应用的活动 VPN";
         }
+    }
+
+    private ConnectivityManager.NetworkCallback createDefaultCallback(long generation) {
+        return new ConnectivityManager.NetworkCallback() {
+            @Override public void onAvailable(Network network) {
+                if (!currentRequest(generation)) return;
+                if (routes.available(network)) {
+                    defaultCapabilities = null;
+                    invalidateSession();
+                    attemptStart();
+                }
+            }
+
+            @Override public void onCapabilitiesChanged(Network network, NetworkCapabilities capabilities) {
+                if (!currentRequest(generation) || !routes.isCurrentDefault(network)) return;
+                boolean transportChanged = defaultCapabilities != null
+                        && defaultCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
+                        && (defaultCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
+                                != capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
+                        || defaultCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+                                != capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI));
+                defaultCapabilities = new NetworkCapabilities(capabilities);
+                if (routes.capabilities(network, capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN),
+                        capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) || transportChanged)
+                    invalidateSession();
+                attemptStart();
+                notifyChanged();
+            }
+
+            @Override public void onBlockedStatusChanged(Network network, boolean blocked) {
+                if (!currentRequest(generation)) return;
+                if (routes.blocked(network, blocked)) { invalidateSession(); attemptStart(); }
+            }
+
+            @Override public void onLost(Network network) {
+                if (!currentRequest(generation) || !routes.lost(network)) return;
+                defaultCapabilities = null;
+                invalidateSession();
+                attemptStart();
+            }
+        };
     }
 
     private ConnectivityManager.NetworkCallback createCallback(boolean forWifi, long generation) {
@@ -246,12 +301,21 @@ public final class CellularRelay implements Closeable {
             return;
         }
         if (ready || building) return;
+        RelayRoutePolicy.Selection<Network> selected = routes.select(cell);
+        if (selected.network == null) {
+            status = selected.kind == RelayRoutePolicy.Kind.WAIT_VPN
+                    ? "VPN 暂不可用或被系统阻止，请检查手机代理；本次未回退蜂窝直连。"
+                    : "正在确认手机的默认网络，请稍候…";
+            notifyChanged();
+            return;
+        }
         building = true;
         status = "双网络已连接，正在准备中转…";
         notifyChanged();
         long expectedRevision = revision;
         Network wifiSnapshot = wifi;
-        Network cellSnapshot = cell;
+        Network publicSnapshot = selected.network;
+        boolean vpnSnapshot = selected.kind == RelayRoutePolicy.Kind.VPN;
         InetAddress addressSnapshot = wifiAddress;
         String hostSnapshot = tavernHost;
         builder.execute(() -> {
@@ -266,8 +330,8 @@ public final class CellularRelay implements Closeable {
                 if (tavernAddresses.isEmpty()) {
                     failure = "酒馆地址没有指向局域网电脑，请填写电脑的内网 IP 后重试。";
                 } else {
-                    built = new RelaySession(expectedRevision, wifiSnapshot, cellSnapshot,
-                            addressSnapshot, hostSnapshot, tavernAddresses, token);
+                    built = new RelaySession(expectedRevision, wifiSnapshot, publicSnapshot,
+                            addressSnapshot, hostSnapshot, tavernAddresses, token, vpnSnapshot);
                     built.start();
                 }
             } catch (UnknownHostException e) {
@@ -297,7 +361,8 @@ public final class CellularRelay implements Closeable {
                 proxyUrl = "socks5h://" + USERNAME + ":" + result.token + "@" + addressSnapshot.getHostAddress() + ":" + result.lan.port();
                 localProxyRule = "socks://127.0.0.1:" + result.local.port();
                 ready = true;
-                status = "中转已就绪 · 外网走手机流量，酒馆页面走局域网";
+                status = vpnSnapshot ? "中转已就绪 · 外网经手机 VPN，酒馆页面走局域网"
+                        : "中转已就绪 · 外网走手机流量，酒馆页面走局域网";
                 notifyChanged();
             });
         });
@@ -323,8 +388,12 @@ public final class CellularRelay implements Closeable {
         invalidateSession();
         unregister(wifiCallback);
         unregister(cellCallback);
+        unregister(defaultCallback);
         wifiCallback = null;
         cellCallback = null;
+        defaultCallback = null;
+        defaultCapabilities = null;
+        routes.seed(null, true, false, false);
         wifi = null;
         cell = null;
         wifiAddress = null;
@@ -390,6 +459,7 @@ public final class CellularRelay implements Closeable {
         private final long expectedRevision;
         private final Network localNetwork;
         private final Network mobileNetwork;
+        private final boolean vpnRouted;
         private final String host;
         private final Set<String> computerAddresses = new HashSet<>();
         private final List<InetAddress> computerAddressList;
@@ -400,10 +470,11 @@ public final class CellularRelay implements Closeable {
         private final SocksProxyServer local;
 
         RelaySession(long expectedRevision, Network wifi, Network cell, InetAddress bindAddress,
-                     String host, List<InetAddress> addresses, String token) throws IOException {
+                     String host, List<InetAddress> addresses, String token, boolean vpnRouted) throws IOException {
             this.expectedRevision = expectedRevision;
             localNetwork = wifi;
             mobileNetwork = cell;
+            this.vpnRouted = vpnRouted;
             this.host = host;
             this.token = token;
             computerAddressList = addresses;
@@ -438,11 +509,12 @@ public final class CellularRelay implements Closeable {
                     RelayConnectPlan plan = new RelayConnectPlan(SystemClock::elapsedRealtime);
                     InetAddress[] addresses = network.getAllByName(target);
                     checkActive();
-                    diagnostics.resolved(attempt, addresses);
+                    boolean allowFakeIp = vpnRouted && RelayAddressPolicy.allowsVpnFakeIpHost(target);
+                    diagnostics.resolved(attempt, addresses, allowFakeIp);
                     connected = plan.connect(addresses, this::checkActive, (address, timeout) -> {
                         diagnostics.connecting(attempt, address);
                         return openSocket(network, address, port, timeout);
-                    });
+                    }, allowFakeIp);
                 }
                 diagnostics.connected(attempt, connected.getInetAddress());
                 return connected;

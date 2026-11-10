@@ -37,12 +37,16 @@ final class RelayConnectPlan {
     }
 
     static List<InetAddress> candidates(InetAddress[] resolved) {
+        return candidates(resolved, false);
+    }
+
+    static List<InetAddress> candidates(InetAddress[] resolved, boolean allowVpnFakeIp) {
         List<InetAddress> firstFamily = new ArrayList<>();
         List<InetAddress> secondFamily = new ArrayList<>();
         Set<InetAddress> unique = new LinkedHashSet<>();
         boolean firstIsIpv4 = false;
         for (InetAddress address : resolved) {
-            if (!RelayAddressPolicy.isPublicAddress(address) || !unique.add(address)) continue;
+            if (!RelayAddressPolicy.isAllowedDestination(address, allowVpnFakeIp) || !unique.add(address)) continue;
             boolean ipv4 = address instanceof Inet4Address;
             if (unique.size() == 1) firstIsIpv4 = ipv4;
             (ipv4 == firstIsIpv4 ? firstFamily : secondFamily).add(address);
@@ -57,7 +61,11 @@ final class RelayConnectPlan {
     }
 
     Socket connect(InetAddress[] resolved, ActiveCheck active, Connector connector) throws IOException {
-        List<InetAddress> candidates = candidates(resolved);
+        return connect(resolved, active, connector, false);
+    }
+
+    Socket connect(InetAddress[] resolved, ActiveCheck active, Connector connector, boolean allowVpnFakeIp) throws IOException {
+        List<InetAddress> candidates = candidates(resolved, allowVpnFakeIp);
         active.check();
         if (candidates.isEmpty()) throw new AddressRejectedException();
         IOException lastError = new IOException("No destination could be reached");

@@ -303,7 +303,7 @@ public class BrowserService extends Service {
     public String connectionMessage() { return connectionState.message(); }
 
     public void diagnoseRelay(java.util.function.Consumer<String> callback) {
-        String heading = "酒馆口袋 1.3.3 连接诊断\n这里只显示连接阶段和计数，不读取模型密钥或请求正文。\n\n";
+        String heading = "酒馆口袋 1.3.4 连接诊断\n这里只显示连接阶段和计数，不读取模型密钥或请求正文。\n\n";
         if (controlOrigin.isEmpty()) {
             callback.accept(heading + relay.diagnostics() + "\n\n电脑：尚未打开酒馆，请先连接并登录后查看。" );
             return;
